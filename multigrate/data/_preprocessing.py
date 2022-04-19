@@ -5,7 +5,7 @@ import numpy as np
 
 
 def organize_multiome_anndatas(adatas, groups, layers=None, modality_lengths=None):
-    # set .X to the desired lay
+    # set .X to the desired layer
     # TOOD: add checks for layers
 
     # needed for scArches operation setup

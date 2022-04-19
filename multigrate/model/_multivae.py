@@ -11,7 +11,9 @@ from ..module import MultiVAETorch
 from ..train import MultiVAETrainingPlan
 from ..distributions import *
 from scvi.data._anndata import _setup_anndata
+
 from scvi.dataloaders import DataSplitter
+from ..dataloaders import GroupDataSplitter, GroupAnnDataLoader
 from typing import List, Optional, Union
 from scvi.model.base import BaseModelClass
 from scvi.train._callbacks import SaveBestState
@@ -24,7 +26,7 @@ logger = logging.getLogger(__name__)
 
 
 class MultiVAE(BaseModelClass):
-    """CPA model
+    """MultiVAE model
     Parameters
     ----------
     adata
@@ -72,7 +74,7 @@ class MultiVAE(BaseModelClass):
         losses: List[str] = [],
         dropout: float = 0.2,
         cond_dim: int = 10,
-        kernel_type="not gaussian",
+        kernel_type="gaussian",
         loss_coefs=[],
         integrate_on_idx=None,
         cont_cov_type="logsigm",
@@ -86,6 +88,7 @@ class MultiVAE(BaseModelClass):
         n_hidden_shared_decoder: int = 32,
         add_shared_decoder=False,
         ignore_categories=[],
+        mmd: str = "latent",
     ):
 
         super().__init__(adata)
@@ -111,6 +114,7 @@ class MultiVAE(BaseModelClass):
                 ].index(integrate_on)
 
         self.adata = adata
+        self.group_column = integrate_on
 
         cont_covariate_dims = []
         if adata.uns["_scvi"].get("extra_continuous_keys") is not None:
@@ -157,6 +161,7 @@ class MultiVAE(BaseModelClass):
             n_layers_cont_embed=n_layers_cont_embed,
             n_hidden_cont_embed=n_hidden_cont_embed,
             add_shared_decoder=add_shared_decoder,
+            mmd=mmd,
         )
 
         self.init_params_ = self._get_init_params(locals())
@@ -169,7 +174,16 @@ class MultiVAE(BaseModelClass):
 
             adata = self._validate_anndata(adata)
 
-            scdl = self._make_data_loader(adata=self.adata, batch_size=batch_size)
+            scdl = self._make_data_loader(
+                adata=adata,
+                batch_size=batch_size,
+                min_size_per_class=batch_size,  # hack to ensure that not full batches are processed properly
+                data_loader_class=GroupAnnDataLoader,
+                shuffle=False,
+                shuffle_classes=False,
+                group_column=self.group_column,
+                drop_last=False,
+            )
 
             imputed = []
             for tensors in scdl:
@@ -190,7 +204,16 @@ class MultiVAE(BaseModelClass):
 
             adata = self._validate_anndata(adata)
 
-            scdl = self._make_data_loader(adata=adata, batch_size=batch_size)
+            scdl = self._make_data_loader(
+                adata=adata,
+                batch_size=batch_size,
+                min_size_per_class=batch_size,  # hack to ensure that not full batches are processed properly
+                data_loader_class=GroupAnnDataLoader,
+                shuffle=False,
+                shuffle_classes=False,
+                group_column=self.group_column,
+                drop_last=False,
+            )
 
             latent = []
             for tensors in scdl:
@@ -283,14 +306,23 @@ class MultiVAE(BaseModelClass):
             kwargs["callbacks"].append(
                 SaveBestState(monitor="reconstruction_loss_validation")
             )
-
-        data_splitter = DataSplitter(
-            self.adata,
-            train_size=train_size,
-            validation_size=validation_size,
-            batch_size=batch_size,
-            use_gpu=use_gpu,
-        )
+        if self.group_column is not None:
+            data_splitter = GroupDataSplitter(
+                self.adata,
+                group_column=self.group_column,
+                train_size=train_size,
+                validation_size=validation_size,
+                batch_size=batch_size,
+                use_gpu=use_gpu,
+            )
+        else:
+            data_splitter = DataSplitter(
+                self.adata,
+                train_size=train_size,
+                validation_size=validation_size,
+                batch_size=batch_size,
+                use_gpu=use_gpu,
+            )
         training_plan = MultiVAETrainingPlan(self.module, **plan_kwargs)
         runner = TrainRunner(
             self,

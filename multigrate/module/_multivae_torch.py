@@ -24,7 +24,7 @@ class MultiVAETorch(BaseModuleClass):
         losses=[],
         dropout=0.2,
         cond_dim=10,
-        kernel_type="not gaussian",
+        kernel_type="gaussian",
         loss_coefs=[],
         num_groups=1,  # to integrate on
         integrate_on_idx=None,
@@ -40,6 +40,7 @@ class MultiVAETorch(BaseModuleClass):
         n_hidden_decoders=[],
         n_hidden_shared_decoder: int = 32,
         add_shared_decoder=True,
+        mmd="latent",
     ):
         super().__init__()
 
@@ -52,6 +53,7 @@ class MultiVAETorch(BaseModuleClass):
         self.add_shared_decoder = add_shared_decoder
         self.n_cont_cov = len(cont_covariate_dims)
         self.cont_cov_type = cont_cov_type
+        self.mmd = mmd
 
         # needed to query to reference
         self.normalization = normalization
@@ -290,7 +292,9 @@ class MultiVAETorch(BaseModuleClass):
             masks = [x.sum(dim=1) > 0 for x in xs]  # list of masks per modality
             masks = torch.stack(masks, dim=1)
 
+        # if we want to condition encoders, i.e. concat covariates to the input
         if self.condition_encoders:
+            # check if need to concat categorical covariates
             if cat_covs is not None:
                 cat_embedds = [
                     cat_covariate_embedding(covariate.long())
@@ -305,22 +309,27 @@ class MultiVAETorch(BaseModuleClass):
                 cat_embedds = torch.cat(cat_embedds, dim=-1)
             else:
                 cat_embedds = torch.Tensor().to(self.device)
-
+            # check if need to concat continuous covariates
             if self.n_cont_cov > 0:
                 if cont_covs.shape[-1] != self.n_cont_cov:  # get rid of size_factors
-                    # raise RuntimeError("cont_covs.shape[-1] != self.n_cont_cov")
                     cont_covs = cont_covs[:, 0 : self.n_cont_cov]
                 cont_embedds = self.compute_cont_cov_embeddings_(cont_covs)
             else:
                 cont_embedds = torch.Tensor().to(self.device)
-
+            # concatenate input with categorical and continuous covariates
             xs = [
                 torch.cat([x, cat_embedds, cont_embedds], dim=-1) for x in xs
             ]  # concat embedding to each modality x along the feature axis
 
+        # TODO don't forward if mask is 0 for that dataset for that modality
+        # hs = hidden state that we get after the encoder but before calculating mu and logvar for each modality
         hs = [self.x_to_h(x, mod) for mod, x in enumerate(xs)]
+        # out = [zs_marginal, mus, logvars] and len(zs_marginal) = len(mus) = len(logvars) = number of modalities
         out = [self.bottleneck(h, mod) for mod, h in enumerate(hs)]
-        mus = [mod_out[1] for mod_out in out]  # TODO check if easier to use split
+        # split out into zs_marginal, mus and logvars TODO check if easier to use split
+        zs_marginal = [mod_out[0] for mod_out in out]
+        z_marginal = torch.stack(zs_marginal, dim=1)
+        mus = [mod_out[1] for mod_out in out]
         mu = torch.stack(mus, dim=1)
         logvars = [mod_out[2] for mod_out in out]
         logvar = torch.stack(logvars, dim=1)
@@ -329,7 +338,9 @@ class MultiVAETorch(BaseModuleClass):
         # drop mus and logvars according to masks for kl calculation
         # TODO here or in loss calculation? check multiVI
         # return mus+mus_joint
-        return dict(z_joint=z_joint, mu=mu_joint, logvar=logvar_joint)
+        return dict(
+            z_joint=z_joint, mu=mu_joint, logvar=logvar_joint, z_marginal=z_marginal
+        )
 
     @auto_move_data
     def generative(self, z_joint, cat_covs, cont_covs):
@@ -398,6 +409,7 @@ class MultiVAETorch(BaseModuleClass):
         mu = inference_outputs["mu"]
         logvar = inference_outputs["logvar"]
         z_joint = inference_outputs["z_joint"]
+        # z_marginal = inference_outputs["z_marginal"]
 
         xs = torch.split(
             x, self.input_dims, dim=-1
@@ -408,11 +420,15 @@ class MultiVAETorch(BaseModuleClass):
             xs, rs, self.losses, integrate_on, size_factor, self.loss_coefs, masks
         )
         kl_loss = kl(Normal(mu, torch.sqrt(torch.exp(logvar))), Normal(0, 1)).sum(dim=1)
-        integ_loss = (
-            torch.tensor(0.0).to(self.device)
-            if self.loss_coefs["integ"] == 0
-            else self.calc_integ_loss(z_joint, integrate_on).to(self.device)
-        )
+
+        if self.loss_coefs["integ"] == 0:
+            integ_loss = torch.tensor(0.0).to(self.device)
+        else:
+            integ_loss = self.calc_integ_loss(z_joint, integrate_on).to(self.device)
+            # if self.mmd == "marginal":
+            #   integ_loss += self.calc_integ_loss(z_marginal, integrate_on).to(
+            #      self.device
+            # )
         cycle_loss = (
             torch.tensor(0.0).to(self.device)
             if self.loss_coefs["cycle"] == 0
@@ -510,7 +526,6 @@ class MultiVAETorch(BaseModuleClass):
         for g in set(list(group.squeeze().cpu().numpy())):
             idx = (group == g).nonzero(as_tuple=True)[0]
             zs.append(z[idx])
-
         for i in range(len(zs)):
             for j in range(i + 1, len(zs)):
                 loss += MMD(kernel_type=self.kernel_type)(zs[i], zs[j])
