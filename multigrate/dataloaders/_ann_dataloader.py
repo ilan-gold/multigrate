@@ -9,6 +9,7 @@ from typing import Optional, Union
 import anndata
 import copy
 import itertools
+import warnings
 
 
 class StratifiedSampler(torch.utils.data.sampler.Sampler):
@@ -22,6 +23,10 @@ class StratifiedSampler(torch.utils.data.sampler.Sampler):
         drop_last: Union[bool, int] = True,
         shuffle_classes: bool = True,
     ):
+        if shuffle is False:
+            warnings.warn(
+                "Do not use StratifiedSampler with shuffle=False, use standard scvi-tools sampler."
+            )
         if drop_last > batch_size:
             raise ValueError(
                 "drop_last can't be greater than batch_size. "
@@ -54,7 +59,6 @@ class StratifiedSampler(torch.utils.data.sampler.Sampler):
             idx = np.where(self.group_labels == cl)[0]
             cl_idx = self.indices[idx]
             n_obs = len(cl_idx)
-
             last_batch_len = n_obs % self.min_size_per_class
             if (self.drop_last is True) or (last_batch_len < self.drop_last):
                 drop_last_n = last_batch_len
@@ -192,7 +196,7 @@ class GroupAnnDataLoader(DataLoader):
 
         self.dataset = AnnTorchDataset(adata, getitem_tensors=data_and_attributes)
 
-        if not min_size_per_class:
+        if min_size_per_class is None:
             min_size_per_class = batch_size // 2
 
         sampler_kwargs = {

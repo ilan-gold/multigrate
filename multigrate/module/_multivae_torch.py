@@ -96,11 +96,9 @@ class MultiVAETorch(BaseModuleClass):
             "kl": 1e-6,
             "integ": 1e-2,
             "cycle": 0,
-            "nb": 1,
-            "zinb": 1,
-            "mse": 1,
-            "bce": 1,
         }
+        for i in range(self.n_modality):
+            self.loss_coefs[str(i)] = 1
         self.loss_coefs.update(loss_coefs)
 
         # assume for now that can only use nb/zinb once, i.e. for RNA-seq modality
@@ -409,14 +407,14 @@ class MultiVAETorch(BaseModuleClass):
         mu = inference_outputs["mu"]
         logvar = inference_outputs["logvar"]
         z_joint = inference_outputs["z_joint"]
-        # z_marginal = inference_outputs["z_marginal"]
+        z_marginal = inference_outputs["z_marginal"]
 
         xs = torch.split(
             x, self.input_dims, dim=-1
         )  # list of tensors of len = n_mod, each tensor is of shape batch_size x mod_input_dim
         masks = [x.sum(dim=1) > 0 for x in xs]
 
-        recon_loss = self.calc_recon_loss(
+        recon_loss, modality_recon_losses = self.calc_recon_loss(
             xs, rs, self.losses, integrate_on, size_factor, self.loss_coefs, masks
         )
         kl_loss = kl(Normal(mu, torch.sqrt(torch.exp(logvar))), Normal(0, 1)).sum(dim=1)
@@ -450,14 +448,18 @@ class MultiVAETorch(BaseModuleClass):
             + self.loss_coefs["cycle"] * cycle_loss
         )
         reconst_losses = dict(recon_loss=recon_loss)
+        modality_recon_losses = {
+            i: modality_recon_losses[i] for i in range(len(modality_recon_losses))
+        }
 
         return LossRecorder(
             loss,
             reconst_losses,
-            self.loss_coefs["kl"] * kl_loss,
+            kl_loss,
             kl_global=torch.tensor(0.0),
             integ_loss=integ_loss,
             cycle_loss=cycle_loss,
+            modality_recon_losses=modality_recon_losses,
         )
 
     # TODO ??
@@ -477,7 +479,7 @@ class MultiVAETorch(BaseModuleClass):
             if len(r) != 2 and len(r.shape) == 3:
                 r = r.squeeze()
             if loss_type == "mse":
-                mse_loss = loss_coefs["mse"] * torch.sum(
+                mse_loss = loss_coefs[str(i)] * torch.sum(
                     nn.MSELoss(reduction="none")(r, x), dim=-1
                 )
                 loss.append(mse_loss)
@@ -492,7 +494,7 @@ class MultiVAETorch(BaseModuleClass):
                 nb_loss = torch.sum(
                     NegativeBinomial(mu=dec_mean, theta=dispersion).log_prob(x), dim=-1
                 )
-                nb_loss = loss_coefs["nb"] * nb_loss
+                nb_loss = loss_coefs[str(i)] * nb_loss
                 loss.append(-nb_loss)
             elif loss_type == "zinb":
                 dec_mean, dec_dropout = r
@@ -510,15 +512,18 @@ class MultiVAETorch(BaseModuleClass):
                     ).log_prob(x),
                     dim=-1,
                 )
-                zinb_loss = loss_coefs["zinb"] * zinb_loss
+                zinb_loss = loss_coefs[str(i)] * zinb_loss
                 loss.append(-zinb_loss)
             elif loss_type == "bce":
-                bce_loss = loss_coefs["bce"] * torch.sum(
+                bce_loss = loss_coefs[str(i)] * torch.sum(
                     torch.nn.BCELoss(reduction="none")(r, x), dim=-1
                 )
                 loss.append(bce_loss)
 
-        return torch.sum(torch.stack(loss, dim=-1) * torch.stack(masks, dim=-1), dim=1)
+        return (
+            torch.sum(torch.stack(loss, dim=-1) * torch.stack(masks, dim=-1), dim=1),
+            torch.sum(torch.stack(loss, dim=-1) * torch.stack(masks, dim=-1), dim=0),
+        )
 
     def calc_integ_loss(self, z, group):
         loss = torch.tensor(0.0).to(self.device)

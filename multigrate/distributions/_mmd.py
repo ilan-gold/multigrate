@@ -12,6 +12,7 @@ class MMD(torch.nn.Module):
         x,
         y,
         gamma=[
+            1e-7,
             1e-6,
             1e-5,
             1e-4,
@@ -31,6 +32,7 @@ class MMD(torch.nn.Module):
             1e4,
             1e5,
             1e6,
+            1e7,
         ],
     ):
 

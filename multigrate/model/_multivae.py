@@ -11,6 +11,7 @@ from ..module import MultiVAETorch
 from ..train import MultiVAETrainingPlan
 from ..distributions import *
 from scvi.data._anndata import _setup_anndata
+from scvi.module.base import auto_move_data
 
 from scvi.dataloaders import DataSplitter
 from ..dataloaders import GroupDataSplitter, GroupAnnDataLoader
@@ -21,6 +22,7 @@ from scvi.train import TrainRunner
 from scvi.model._utils import parse_use_gpu_arg
 from scvi.model.base._utils import _initialize_model
 from matplotlib import pyplot as plt
+from math import ceil
 
 logger = logging.getLogger(__name__)
 
@@ -100,7 +102,7 @@ class MultiVAE(BaseModelClass):
 
         num_groups = 1
         integrate_on_idx = None
-        if integrate_on:
+        if integrate_on is not None:
             if integrate_on not in adata.uns["_scvi"]["extra_categoricals"]["keys"]:
                 raise ValueError(
                     f'Cannot integrate on {integrate_on}, has to be one of extra categoricals = {adata.uns["_scvi"]["extra_categoricals"]["keys"]}'
@@ -195,7 +197,7 @@ class MultiVAE(BaseModelClass):
 
             return torch.cat(imputed).squeeze().numpy()
 
-    # TODO fix to work with  @torch.no_grad()
+    @auto_move_data
     def get_latent_representation(self, adata=None, batch_size=64):
         with torch.no_grad():
             self.module.eval()
@@ -207,12 +209,6 @@ class MultiVAE(BaseModelClass):
             scdl = self._make_data_loader(
                 adata=adata,
                 batch_size=batch_size,
-                min_size_per_class=batch_size,  # hack to ensure that not full batches are processed properly
-                data_loader_class=GroupAnnDataLoader,
-                shuffle=False,
-                shuffle_classes=False,
-                group_column=self.group_column,
-                drop_last=False,
             )
 
             latent = []
@@ -371,13 +367,16 @@ class MultiVAE(BaseModelClass):
 
         df["epoch"] = df.index
 
-        plt.figure(figsize=(15, 10))
-
         loss_names = ["kl_local", "elbo", "reconstruction_loss"]
+        for i in range(self.module.n_modality):
+            loss_names.append(f"modality_{i}_recon_loss")
+
         if self.module.loss_coefs["integ"] != 0:
             loss_names.append("integ")
 
-        nrows = 2
+        nrows = ceil(len(loss_names) / 2)
+
+        plt.figure(figsize=(15, 5 * nrows))
 
         for i, name in enumerate(loss_names):
             plt.subplot(nrows, 2, i + 1)
