@@ -8,8 +8,8 @@ class MultiVAETrainingPlan(AdversarialTrainingPlan):
         reconstruction_loss = scvi_loss.reconstruction_loss
         self.log("validation_loss", scvi_loss.loss, on_epoch=True)
         val_losses = {
-            f"modality_{i}_recon_loss": v
-            for i, v in enumerate(scvi_loss.modality_recon_losses)
+            f"modality_{i}_recon_loss": scvi_loss.modality_recon_losses[k].detach()
+            for i, k in enumerate(scvi_loss.modality_recon_losses)
         }
         val_losses.update(
             {

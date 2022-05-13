@@ -26,6 +26,15 @@ def organize_multiome_anndatas(adatas, groups, layers=None, modality_lengths=Non
 
     # TODO: add check that obs_names are same for the same groups
 
+    # this can happen if not all modalities are present in the query
+    for mod, length in enumerate(modality_lengths):
+        if modality_var_names.get(mod, None) is None:
+            # create dummy var names
+            modality_var_names[mod] = list(range(length))
+            modality_var_names[mod] = [
+                f"mod{mod}_{name}" for name in modality_var_names[mod]
+            ]
+
     for mod, (modality_adatas, modality_groups) in enumerate(zip(adatas, groups)):
         for i, (adata, group) in enumerate(zip(modality_adatas, modality_groups)):
             if not isinstance(adata, ad.AnnData) and adata == None:

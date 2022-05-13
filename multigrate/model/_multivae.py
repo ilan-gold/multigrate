@@ -21,6 +21,7 @@ from scvi.train._callbacks import SaveBestState
 from scvi.train import TrainRunner
 from scvi.model._utils import parse_use_gpu_arg
 from scvi.model.base._utils import _initialize_model
+from scvi.data import transfer_anndata_setup
 from matplotlib import pyplot as plt
 from math import ceil
 
@@ -402,6 +403,9 @@ class MultiVAE(BaseModelClass):
         attr_dict = reference_model._get_user_attributes()
         attr_dict = {a[0]: a[1] for a in attr_dict if a[0][-1] == "_"}
         load_state_dict = deepcopy(reference_model.module.state_dict())
+        scvi_setup_dict = attr_dict.pop("scvi_setup_dict_")
+
+        transfer_anndata_setup(scvi_setup_dict, adata, extend_categories=True)
 
         model = _initialize_model(cls, adata, attr_dict)
 
@@ -418,6 +422,8 @@ class MultiVAE(BaseModelClass):
                 adata.uns["_scvi"]["extra_categoricals"]["n_cats_per_key"],
             )
         ]
+
+        model.to_device(device)
 
         new_state_dict = model.module.state_dict()
         for key, load_ten in load_state_dict.items():  # load_state_dict = old
@@ -437,8 +443,6 @@ class MultiVAE(BaseModelClass):
                 load_state_dict[key] = fixed_ten
 
         model.module.load_state_dict(load_state_dict)
-
-        model.to_device(device)
 
         # freeze everything but the condition_layer in condMLPs
         if freeze:

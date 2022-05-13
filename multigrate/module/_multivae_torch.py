@@ -40,7 +40,7 @@ class MultiVAETorch(BaseModuleClass):
         n_hidden_decoders=[],
         n_hidden_shared_decoder: int = 32,
         add_shared_decoder=True,
-        mmd="latent",
+        mmd="latent",  # or both or marginal
     ):
         super().__init__()
 
@@ -407,12 +407,14 @@ class MultiVAETorch(BaseModuleClass):
         mu = inference_outputs["mu"]
         logvar = inference_outputs["logvar"]
         z_joint = inference_outputs["z_joint"]
-        z_marginal = inference_outputs["z_marginal"]
+        z_marginal = inference_outputs[
+            "z_marginal"
+        ]  # batch_size x n_modalities x latent_dim
 
         xs = torch.split(
             x, self.input_dims, dim=-1
         )  # list of tensors of len = n_mod, each tensor is of shape batch_size x mod_input_dim
-        masks = [x.sum(dim=1) > 0 for x in xs]
+        masks = [x.sum(dim=1) > 0 for x in xs]  # [batch_size] * num_modalities
 
         recon_loss, modality_recon_losses = self.calc_recon_loss(
             xs, rs, self.losses, integrate_on, size_factor, self.loss_coefs, masks
@@ -422,11 +424,43 @@ class MultiVAETorch(BaseModuleClass):
         if self.loss_coefs["integ"] == 0:
             integ_loss = torch.tensor(0.0).to(self.device)
         else:
-            integ_loss = self.calc_integ_loss(z_joint, integrate_on).to(self.device)
-            # if self.mmd == "marginal":
-            #   integ_loss += self.calc_integ_loss(z_marginal, integrate_on).to(
-            #      self.device
-            # )
+            integ_loss = torch.tensor(0.0).to(self.device)
+            if self.mmd == "latent" or self.mmd == "both":
+                integ_loss += self.calc_integ_loss(z_joint, integrate_on).to(
+                    self.device
+                )
+            if self.mmd == "marginal" or self.mmd == "both":
+                for i in range(len(masks)):
+                    for j in range(i + 1, len(masks)):
+                        idx_where_to_calc_mmd = torch.eq(
+                            masks[i] == masks[j],
+                            torch.eq(masks[i], torch.ones_like(masks[i])),
+                        )
+                        if (
+                            idx_where_to_calc_mmd.any()
+                        ):  # if need to calc mmd for a group between modalities
+                            marginal_i = z_marginal[:, i, :][idx_where_to_calc_mmd]
+                            marginal_j = z_marginal[:, j, :][idx_where_to_calc_mmd]
+                            marginals = torch.cat([marginal_i, marginal_j])
+                            modalities = torch.cat(
+                                [
+                                    torch.Tensor([i] * marginal_i.shape[0]),
+                                    torch.Tensor([j] * marginal_j.shape[0]),
+                                ]
+                            ).to(self.device)
+
+                            integ_loss += self.calc_integ_loss(
+                                marginals, modalities
+                            ).to(self.device)
+
+                for i in range(len(masks)):
+                    marginal_i = z_marginal[:, i, :]
+                    marginal_i = marginal_i[masks[i]]
+                    group_marginal = integrate_on[masks[i]]
+                    integ_loss += self.calc_integ_loss(marginal_i, group_marginal).to(
+                        self.device
+                    )
+
         cycle_loss = (
             torch.tensor(0.0).to(self.device)
             if self.loss_coefs["cycle"] == 0
@@ -527,13 +561,12 @@ class MultiVAETorch(BaseModuleClass):
 
     def calc_integ_loss(self, z, group):
         loss = torch.tensor(0.0).to(self.device)
-        zs = []
-        for g in set(list(group.squeeze().cpu().numpy())):
-            idx = (group == g).nonzero(as_tuple=True)[0]
-            zs.append(z[idx])
-        for i in range(len(zs)):
-            for j in range(i + 1, len(zs)):
-                loss += MMD(kernel_type=self.kernel_type)(zs[i], zs[j])
+        unique = torch.unique(group)
+        if len(unique) > 1:
+            zs = [z[group == i] for i in unique]
+            for i in range(len(zs)):
+                for j in range(i + 1, len(zs)):
+                    loss += MMD(kernel_type=self.kernel_type)(zs[i], zs[j])
         return loss
 
     def calc_cycle_loss(
